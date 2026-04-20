@@ -1,55 +1,119 @@
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const pool = require('../db');
 
-// Simulación de base de datos (En producción usar el script SQL anterior)
-let usuarios = []; 
-const JWT_SECRET = "tu_clave_secreta_para_render"; // Usar variables de entorno en Render
-
-// CU1: Registro de Usuario
-router.post('/register', async (req, res) => {
+// ==========================================
+// 1. RUTA DE LOGIN (CU2)
+// ==========================================
+router.post('/login', async (req, res) => {
+    const { correo_electronico, contrasena } = req.body;
+    
     try {
-        const { nombre_completo, correo_electronico, telefono, contrasena, rol_acceso } = req.body;
+        // Buscamos al usuario por correo
+        const userResult = await pool.query(
+            'SELECT * FROM usuarios WHERE correo_electronico = $1', 
+            [correo_electronico]
+        );
 
-        // Cifrar contraseña por seguridad (Módulo de Seguridad)
-        const salt = await bcrypt.genSalt(10);
-        const hashedContrasena = await bcrypt.hash(contrasena, salt);
+        if (userResult.rows.length === 0) {
+            return res.status(400).json({ mensaje: 'Usuario no encontrado' });
+        }
 
-        const nuevoUsuario = {
-            id: usuarios.length + 1,
-            nombre_completo,
-            correo_electronico,
-            telefono,
-            contrasena: hashedContrasena,
-            rol_acceso // cliente, taller, etc. [cite: 215]
-        };
+        const usuario = userResult.rows[0];
 
-        usuarios.push(nuevoUsuario);
-        res.status(201).json({ mensaje: "Usuario registrado con éxito", id: nuevoUsuario.id });
-    } catch (error) {
-        res.status(500).json({ error: "Error al registrar usuario" });
+        // Verificamos contraseña (directa para el examen)
+        if (usuario.contrasena === contrasena) {
+            res.json({
+                mensaje: 'Login exitoso',
+                token: 'TOKEN_PRUEBA_G23', 
+                usuario: {
+                    id: usuario.id_usuario,
+                    nombre_completo: usuario.nombre_completo,
+                    rol: usuario.rol_acceso
+                }
+            });
+        } else {
+            res.status(400).json({ mensaje: 'Contraseña incorrecta' });
+        }
+    } catch (err) {
+        console.error("❌ Error en Login:", err.message);
+        res.status(500).json({ mensaje: 'Error interno del servidor' });
     }
 });
 
-// CU2: Iniciar Sesión
-router.post('/login', async (req, res) => {
-    const { correo_electronico, contrasena } = req.body;
-    const usuario = usuarios.find(u => u.correo_electronico === correo_electronico);
+// ==========================================
+// 2. RUTA DE REGISTRO DE TALLER (CU1)
+// ==========================================
 
-    if (!usuario) return res.status(400).json({ mensaje: "Usuario no encontrado" });
+router.post('/registro-taller', async (req, res) => {
+    console.log("--- INTENTO DE REGISTRO ---");
+    const { 
+        nombre_taller, 
+        correo_electronico, 
+        contrasena, 
+        especialidad, // Se recibe como Array de JS
+        telefono, 
+        direccion 
+    } = req.body;
 
-    const esValido = await bcrypt.compare(contrasena, usuario.contrasena);
-    if (!esValido) return res.status(400).json({ mensaje: "Contraseña incorrecta" });
+    try {
+        if (!pool) {
+            throw new Error("La conexión a la base de datos (pool) no está definida.");
+        }
 
-    // Generar Token JWT
-    const token = jwt.sign(
-        { id: usuario.id, rol: usuario.rol_acceso },
-        JWT_SECRET,
-        { expiresIn: '8h' }
-    );
+        // Insertamos en la BD. Postgres entiende el Array de JS si la columna es TEXT[]
+        const nuevoTaller = await pool.query(
+            `INSERT INTO usuarios (nombre_completo, correo_electronico, contrasena, rol_acceso, especialidad, telefono, direccion) 
+             VALUES ($1, $2, $3, 'taller', $4, $5, $6) RETURNING *`,
+            [nombre_taller, correo_electronico, contrasena, especialidad, telefono, direccion]
+        );
 
-    res.json({ token, usuario: { nombre: usuario.nombre_completo, rol: usuario.rol_acceso } });
+        console.log("✅ Taller registrado con éxito:", nuevoTaller.rows[0].nombre_completo);
+        res.status(201).json({ mensaje: 'Taller registrado exitosamente' });
+
+    } catch (err) {
+        console.error("❌ ERROR REAL EN BD:", err.message);
+        // Si el error es por correo duplicado
+        if (err.code === '23505') {
+            return res.status(400).json({ mensaje: 'Este correo ya está registrado' });
+        }
+        res.status(500).json({ mensaje: 'Error: ' + err.message });
+    }
+});
+// OBTENER PERFIL DEL TALLER
+// backend/routes/auth.js
+router.get('/perfil-taller/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const result = await pool.query(
+            'SELECT nombre_completo, telefono, direccion, especialidad FROM usuarios WHERE id_usuario = $1',
+            [id]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ mensaje: "Usuario no encontrado" });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ mensaje: "Error en el servidor" });
+    }
+});
+
+// ACTUALIZAR DISPONIBILIDAD Y DATOS (CU20)
+router.put('/actualizar-taller/:id', async (req, res) => {
+    const { nombre_completo, especialidad, telefono, direccion } = req.body;
+    try {
+        await pool.query(
+            `UPDATE usuarios 
+             SET nombre_completo = $1, especialidad = $2, telefono = $3, direccion = $4 
+             WHERE id_usuario = $5`,
+            [nombre_completo, especialidad, telefono, direccion, req.params.id]
+        );
+        res.json({ mensaje: "Información y disponibilidad actualizadas correctamente" });
+    } catch (err) {
+        res.status(500).json({ mensaje: "Error al actualizar" });
+    }
 });
 
 module.exports = router;
